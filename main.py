@@ -4,6 +4,7 @@ from dotenv import load_dotenv
 from telegram import Update, BotCommand
 from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, CommandHandler, filters
 from database.manager import init_db, get_user_expenses, get_total_spent
+from database.recurring_manager import process_pending_bills
 from agent import run_agent
 
 # Load environment variables
@@ -69,18 +70,31 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_chat_action("typing")
 
+    # 🔄 Process any pending recurring bills first (Silent)
+    try:
+        process_pending_bills(user_id)
+    except Exception as e:
+        logger.error(f"Error processing recurring bills: {e}")
+
     try:
         response = await run_agent(user_id, user_text)
         text = response["text"]
         attachment = response["attachment"]
 
-        # Delivery layer — the only place we distinguish photo vs text (Telegram API requirement)
-        if attachment and attachment["type"] == "photo":
-            await update.message.reply_photo(
-                photo=open(attachment["path"], "rb"), 
-                caption=text,
-                parse_mode="Markdown"
-            )
+        # Delivery layer — the only place we distinguish photo vs document vs text
+        if attachment:
+            if attachment["type"] == "photo":
+                await update.message.reply_photo(
+                    photo=open(attachment["path"], "rb"), 
+                    caption=text,
+                    parse_mode="Markdown"
+                )
+            elif attachment["type"] == "document":
+                await update.message.reply_document(
+                    document=open(attachment["path"], "rb"),
+                    caption=text,
+                    parse_mode="Markdown"
+                )
         else:
             await update.message.reply_text(text, parse_mode="Markdown")
 

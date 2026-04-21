@@ -11,6 +11,9 @@ from langgraph.graph.message import add_messages
 
 from tools.financial_utils import log_transaction, check_history, get_spending_summary
 from tools.analytics_tools import generate_chart
+from tools.export_tools import export_expenses
+from tools.budget_tools import manage_budgets, get_budget_report
+from tools.recurring_tools import setup_recurring_bill, list_recurring_bills, remove_recurring_bill
 
 load_dotenv()
 
@@ -39,7 +42,11 @@ llm = ChatOpenAI(
     default_headers={"HTTP-Referer": "https://wallet-watch-bot.app", "X-Title": "Wallet Watch"},
 )
 
-ALL_TOOLS = [log_transaction, check_history, get_spending_summary, generate_chart]
+ALL_TOOLS = [
+    log_transaction, check_history, get_spending_summary, generate_chart, 
+    export_expenses, manage_budgets, get_budget_report,
+    setup_recurring_bill, list_recurring_bills, remove_recurring_bill
+]
 TOOL_MAP = {t.name: t for t in ALL_TOOLS}
 llm_with_tools = llm.bind_tools(ALL_TOOLS)
 
@@ -81,9 +88,20 @@ Available tools:
 - check_history: Fetch recent transactions.
 - get_spending_summary: Get total money spent.
 - generate_chart: Create a chart (pie/line/bar) for a given time period.
+- export_expenses: Create a CSV or Excel file of transactions. Handles filters like category or dates.
+- manage_budgets: Setup or update monthly limits for categories or 'Total' spend.
+- get_budget_report: View progress vs budgets with progress bars.
+- setup_recurring_bill: Automate a monthly expense or income. 
+    - For limited durations, convert the time to months (e.g., '1 year' = 12 installments, '6 months' = 6 installments). 
+    - Pass the total count as the 'installments' parameter.
+- list_recurring_bills: Show all automated transactions.
+- remove_recurring_bill: Stop a recurring transaction by its ID.
 
 How to behave:
-- Understand natural language: "spent 200 on food", "got paid 5000", "show charts", etc.
+- Understand natural language and perform math: "setup a 200 expense for Netflix on the 15th", "EMI of 500 for 1 year on the 5th" (convert to 12 installments), etc.
+- If a user sets multiple budgets at once, use a single call to manage_budgets.
+- Always use a tool when action is needed — never invent data.
+- After logging an expense, if the tool returns a budget warning, make sure to relay it clearly to the user.
 - Always use a tool when action is needed — never invent data.
 - For chart requests: if the user specifies a chart type, call generate_chart directly.
   If vague, ask: "Which chart? Pie (categories), Line (trends), or Bar (income vs expense)?"
@@ -132,11 +150,19 @@ def _find_attachment(messages: List[BaseMessage]) -> Optional[dict]:
     """Scan tool results for a generated file — infrastructure only, not business logic."""
     for msg in reversed(messages):
         if isinstance(msg, ToolMessage):
-            m = re.search(r'CHART_PATH:"([^"]+)"', msg.content)
-            if m:
-                path = m.group(1)
+            # Check for charts (photos)
+            m_chart = re.search(r'CHART_PATH:"([^"]+)"', msg.content)
+            if m_chart:
+                path = m_chart.group(1)
                 if os.path.exists(path):
                     return {"type": "photo", "path": path}
+            
+            # Check for exports (documents)
+            m_export = re.search(r'EXPORT_PATH:"([^"]+)"', msg.content)
+            if m_export:
+                path = m_export.group(1)
+                if os.path.exists(path):
+                    return {"type": "document", "path": path}
     return None
 
 # ── Public API ─────────────────────────────────────────────────────────────────
