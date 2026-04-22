@@ -3,3 +3,10 @@ langchain-openai
 langchain-core
 pandas
 openpyxl
+supabase
+postgrest
+pytz
+python-dateutil
+python-dotenv
+python-telegram-bot[job-queue]
+python-dateutil

@@ -40,6 +40,6 @@ def process_pending_bills(user_id: int):
             else:
                 status = ""
 
-            notifications.append(f"🔄 *Automated Log*: Your {btype} of ${amount} for '{description}' ({category}) has been recorded{status}.")
+            notifications.append(f"🔄 *Automated Log*: Your {btype} of ₹{amount} for '{description}' ({category}) has been recorded{status}.")
             
     return notifications

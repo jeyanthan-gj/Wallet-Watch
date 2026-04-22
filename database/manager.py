@@ -1,282 +1,194 @@
-import sqlite3
 import os
+from datetime import datetime, timedelta
+import pytz
+from .supabase_client import supabase
 
-# Database file location (in the parent directory of this module)
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DB_FILE = os.path.join(BASE_DIR, "expenses.db")
+IST = pytz.timezone('Asia/Kolkata')
 
 def init_db():
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER PRIMARY KEY,
-            first_name TEXT,
-            joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS expenses (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            amount REAL NOT NULL,
-            category TEXT NOT NULL,
-            description TEXT,
-            type TEXT NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS budgets (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            category TEXT, -- NULL or 'Total' for global limit
-            amount REAL NOT NULL,
-            period TEXT DEFAULT 'monthly',
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE(user_id, category)
-        )
-    ''')
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS recurring_bills (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            amount REAL NOT NULL,
-            category TEXT NOT NULL,
-            description TEXT,
-            day_of_month INTEGER NOT NULL,
-            type TEXT DEFAULT 'expense',
-            last_processed_month TEXT, -- YYYY-MM
-            is_active INTEGER DEFAULT 1,
-            total_installments INTEGER,
-            remaining_installments INTEGER,
-            interval_months INTEGER DEFAULT 1,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-    conn.commit()
-    conn.close()
+    """No-op for Supabase as tables are created via SQL Editor."""
+    pass
 
 def add_expense_to_db(user_id: int, amount: float, category: str, description: str, exp_type: str):
-    """Saves a transaction to the SQLite database."""
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute('''
-        INSERT INTO expenses (user_id, amount, category, description, type)
-        VALUES (?, ?, ?, ?, ?)
-    ''', (user_id, amount, category, description, exp_type))
-    conn.commit()
-    conn.close()
+    """Saves a transaction to the Supabase database."""
+    data = {
+        "user_id": user_id,
+        "amount": amount,
+        "category": category,
+        "description": description,
+        "type": exp_type,
+        "created_at": datetime.now(IST).isoformat()
+    }
+    response = supabase.table("expenses").insert(data).execute()
     return f"Successfully saved {exp_type}: ₹{amount} for {description} ({category})"
 
+def get_expenses_in_range(user_id: int, start_date: str, end_date: str):
+    """Alias for get_filtered_expenses specifically for date ranges."""
+    return get_filtered_expenses(user_id, start_date=start_date, end_date=end_date)
+
 def get_user_expenses(user_id: int, limit: int = 5):
-    """Fetches the last N expenses for a specific user."""
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute('''
-        SELECT amount, category, description, type, created_at 
-        FROM expenses 
-        WHERE user_id = ? 
-        ORDER BY created_at DESC 
-        LIMIT ?
-    ''', (user_id, limit))
-    rows = cursor.fetchall()
-    conn.close()
+    """Fetches the last N transactions for a specific user."""
+    response = supabase.table("expenses") \
+        .select("amount, category, description, type, created_at") \
+        .eq("user_id", user_id) \
+        .order("created_at", desc=True) \
+        .limit(limit) \
+        .execute()
     
+    rows = response.data
     if not rows:
-        return "No expenses found."
+        return "No transactions found."
     
-    history = "\n".join([f"- ₹{r[0]} on {r[1]} ({r[2]}) at {r[4]}" for r in rows])
+    history = "\n".join([f"- ₹{r['amount']} on {r['category']} ({r['description']}) at {r['created_at'][:16]}" for r in rows])
     return f"Last {len(rows)} transactions:\n{history}"
 
 def get_total_spent(user_id: int):
-    """Calculates total spend for a user."""
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute('SELECT SUM(amount) FROM expenses WHERE user_id = ? AND type = "expense"', (user_id,))
-    total = cursor.fetchone()[0]
-    conn.close()
-    return f"Total spending to date: ₹{total if total else 0.0}"
-
-def get_expenses_in_range(user_id: int, start_date: str, end_date: str):
-    """Fetches all expenses for a user between two dates (YYYY-MM-DD)."""
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute('''
-        SELECT amount, category, description, type, created_at 
-        FROM expenses 
-        WHERE user_id = ? 
-        AND date(created_at) BETWEEN date(?) AND date(?)
-        ORDER BY created_at ASC
-    ''', (user_id, start_date, end_date))
-    rows = cursor.fetchall()
-    conn.close()
-    return rows
+    """Calculates total spend for a user cross all categories and time."""
+    response = supabase.table("expenses") \
+        .select("amount") \
+        .eq("user_id", user_id) \
+        .eq("type", "expense") \
+        .execute()
+    
+    total = sum(item['amount'] for item in response.data) if response.data else 0.0
+    return f"Total spending to date: ₹{total:,.2f}"
 
 def get_filtered_expenses(user_id: int, category: str = None, start_date: str = None, end_date: str = None, exp_type: str = None):
-    """Fetches expenses with optional filters for category, date range, and type."""
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    
-    query = "SELECT amount, category, description, type, created_at FROM expenses WHERE user_id = ?"
-    params = [user_id]
+    """Fetches expenses with optional filters."""
+    query = supabase.table("expenses").select("*").eq("user_id", user_id)
     
     if category:
-        query += " AND category = ?"
-        params.append(category)
+        query = query.eq("category", category)
     if exp_type:
-        query += " AND type = ?"
-        params.append(exp_type)
-    if start_date and end_date:
-        query += " AND date(created_at) BETWEEN date(?) AND date(?)"
-        params.extend([start_date, end_date])
-    elif start_date:
-        query += " AND date(created_at) >= date(?)"
-        params.append(start_date)
-    elif end_date:
-        query += " AND date(created_at) <= date(?)"
-        params.append(end_date)
+        query = query.eq("type", exp_type)
+    if start_date:
+        query = query.gte("created_at", start_date)
+    if end_date:
+        query = query.lte("created_at", end_date)
         
-    query += " ORDER BY created_at ASC"
-    
-    cursor.execute(query, params)
-    rows = cursor.fetchall()
-    conn.close()
-    return rows
+    response = query.order("created_at").execute()
+    # Convert to list of tuples for backwards compatibility with reporting tools
+    return [(r['amount'], r['category'], r['description'], r['type'], r['created_at']) for r in response.data]
 
 def upsert_budget(user_id: int, category: str, amount: float):
-    """Sets or updates a budget for a category (or 'Total')."""
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute('''
-        INSERT INTO budgets (user_id, category, amount)
-        VALUES (?, ?, ?)
-        ON CONFLICT(user_id, category) DO UPDATE SET amount = excluded.amount
-    ''', (user_id, category, amount))
-    conn.commit()
-    conn.close()
+    """Sets or updates a budget for a category."""
+    data = {
+        "user_id": user_id,
+        "category": category,
+        "amount": amount
+    }
+    supabase.table("budgets").upsert(data, on_conflict="user_id,category").execute()
 
 def get_budgets(user_id: int):
     """Retrieves all budgets for a user."""
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute('SELECT category, amount FROM budgets WHERE user_id = ?', (user_id,))
-    rows = cursor.fetchall()
-    conn.close()
-    return {row[0] if row[0] else 'Total': row[1] for row in rows}
+    response = supabase.table("budgets").select("category, amount").eq("user_id", user_id).execute()
+    return {row['category'] if row['category'] else 'Total': float(row['amount']) for row in response.data}
 
 def get_monthly_summary(user_id: int):
-    """Calculates total income and total expense for the current month."""
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    # Current month spending
-    cursor.execute('''
-        SELECT type, SUM(amount) 
-        FROM expenses 
-        WHERE user_id = ? 
-        AND strftime('%Y-%m', created_at) = strftime('%Y-%m', 'now') 
-        GROUP BY type
-    ''', (user_id,))
-    rows = cursor.fetchall()
-    conn.close()
+    """Calculates total income and total expense for the current month in IST."""
+    now_ist = datetime.now(IST)
+    start_of_month = now_ist.replace(day=1, hour=0, minute=0, second=0, microsecond=0).isoformat()
+    
+    response = supabase.table("expenses") \
+        .select("type, amount") \
+        .eq("user_id", user_id) \
+        .gte("created_at", start_of_month) \
+        .execute()
     
     summary = {"income": 0.0, "expense": 0.0}
-    for row in rows:
-        summary[row[0].lower()] = row[1]
+    for row in response.data:
+        btype = row['type'].lower()
+        if btype in summary:
+            summary[btype] += float(row['amount'])
     return summary
 
 def get_category_monthly_spend(user_id: int, category: str):
-    """Calculates total spend for a specific category in the current month."""
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute('''
-        SELECT SUM(amount) 
-        FROM expenses 
-        WHERE user_id = ? 
-        AND category = ? 
-        AND type = 'expense'
-        AND strftime('%Y-%m', created_at) = strftime('%Y-%m', 'now')
-    ''', (user_id, category))
-    total = cursor.fetchone()[0]
-    conn.close()
-    return total if total else 0.0
+    """Calculates total spend for a specific category in the current month in IST."""
+    now_ist = datetime.now(IST)
+    start_of_month = now_ist.replace(day=1, hour=0, minute=0, second=0, microsecond=0).isoformat()
+    
+    response = supabase.table("expenses") \
+        .select("amount") \
+        .eq("user_id", user_id) \
+        .eq("category", category) \
+        .eq("type", "expense") \
+        .gte("created_at", start_of_month) \
+        .execute()
+    
+    return sum(float(item['amount']) for item in response.data) if response.data else 0.0
 
 def add_recurring_bill(user_id: int, amount: float, category: str, description: str, day_of_month: int, btype: str = 'expense', installments: int = None, interval: int = 1):
-    """Adds a new recurring transaction with optional installment limit and custom interval."""
-    from datetime import datetime
-    now = datetime.now()
-    current_day = now.day
-    # If added AFTER the day of the month, mark as processed for this month to start next month
-    last_processed = now.strftime("%Y-%m") if current_day >= day_of_month else None
+    """Adds a new recurring transaction to Supabase with IST timestamp."""
+    now = datetime.now(IST)
+    last_processed = now.strftime("%Y-%m") if now.day >= day_of_month else None
     
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute('''
-        INSERT INTO recurring_bills (user_id, amount, category, description, day_of_month, type, last_processed_month, total_installments, remaining_installments, interval_months)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ''', (user_id, amount, category, description, day_of_month, btype, last_processed, installments, installments, interval))
-    conn.commit()
-    conn.close()
-
-def decrement_installments(bill_id: int):
-    """Reduces the remaining installments count and deactivates if zero."""
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute('UPDATE recurring_bills SET remaining_installments = remaining_installments - 1 WHERE id = ?', (bill_id,))
-    cursor.execute('UPDATE recurring_bills SET is_active = 0 WHERE id = ? AND remaining_installments <= 0', (bill_id,))
-    conn.commit()
-    conn.close()
+    data = {
+        "user_id": user_id,
+        "amount": amount,
+        "category": category,
+        "description": description,
+        "day_of_month": day_of_month,
+        "type": btype,
+        "last_processed_month": last_processed,
+        "total_installments": installments,
+        "remaining_installments": installments,
+        "interval_months": interval,
+        "created_at": now.isoformat()
+    }
+    supabase.table("recurring_bills").insert(data).execute()
 
 def get_active_recurring_bills(user_id: int):
-    """Fetches all active recurring bills for a user."""
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute('''
-        SELECT id, amount, category, description, day_of_month, type, last_processed_month, remaining_installments, interval_months 
-        FROM recurring_bills 
-        WHERE user_id = ? AND is_active = 1
-    ''', (user_id,))
-    rows = cursor.fetchall()
-    conn.close()
-    return rows
+    """Fetches all active recurring bills for a user from Supabase."""
+    response = supabase.table("recurring_bills") \
+        .select("*") \
+        .eq("user_id", user_id) \
+        .eq("is_active", True) \
+        .execute()
+    
+    # Pack into tuple for compatibility with recurring_manager and listing tool
+    return [(r['id'], r['amount'], r['category'], r['description'], r['day_of_month'], 
+             r['type'], r['last_processed_month'], r['remaining_installments'], r['interval_months']) 
+            for r in response.data]
+
+def decrement_installments(bill_id: int):
+    """Reduces the remaining installments count in Supabase."""
+    # First, decrement the counter
+    response = supabase.rpc('decrement_installments', {"bill_id": bill_id}).execute()
+    # Alternatively, client-side if RPC isn't set
+    bill = supabase.table("recurring_bills").select("remaining_installments").eq("id", bill_id).single().execute()
+    if bill.data:
+        new_rem = bill.data['remaining_installments'] - 1
+        update_data = {"remaining_installments": new_rem}
+        if new_rem <= 0:
+            update_data["is_active"] = False
+        supabase.table("recurring_bills").update(update_data).eq("id", bill_id).execute()
 
 def mark_bill_processed(bill_id: int, month_str: str):
     """Updates the last processed month for a recurring bill."""
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute('UPDATE recurring_bills SET last_processed_month = ? WHERE id = ?', (month_str, bill_id))
-    conn.commit()
-    conn.close()
+    supabase.table("recurring_bills") \
+        .update({"last_processed_month": month_str}) \
+        .eq("id", bill_id) \
+        .execute()
 
 def delete_recurring_bill(bill_id: int):
     """Deactivates a recurring bill."""
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute('UPDATE recurring_bills SET is_active = 0 WHERE id = ?', (bill_id,))
-    conn.commit()
-    conn.close()
+    supabase.table("recurring_bills") \
+        .update({"is_active": False}) \
+        .eq("id", bill_id) \
+        .execute()
 
 def register_user(user_id: int, first_name: str = None):
-    """Registers a new user or updates their name."""
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute('''
-        INSERT INTO users (user_id, first_name)
-        VALUES (?, ?)
-        ON CONFLICT(user_id) DO UPDATE SET first_name = excluded.first_name
-    ''', (user_id, first_name))
-    conn.commit()
-    conn.close()
+    """Registers a new user or updates their name in Supabase."""
+    data = {"user_id": user_id, "first_name": first_name}
+    supabase.table("users").upsert(data, on_conflict="user_id").execute()
 
 def get_active_users(days: int = 7):
-    """Returns user_ids who have logged something in the last N days."""
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute('''
-        SELECT DISTINCT user_id 
-        FROM expenses 
-        WHERE date(created_at) >= date('now', ?)
-    ''', (f'-{days} days',))
-    rows = cursor.fetchall()
-    conn.close()
-    return [row[0] for row in rows]
+    """Returns user_ids who have logged something in the last N days (IST aware)."""
+    cutoff = (datetime.now(IST) - timedelta(days=days)).isoformat()
+    
+    response = supabase.table("expenses") \
+        .select("user_id") \
+        .gte("created_at", cutoff) \
+        .execute()
+    
+    return list(set(row['user_id'] for row in response.data))
