@@ -3,6 +3,8 @@ import re
 import json
 from typing import TypedDict, Annotated, List, Dict, Optional
 from dotenv import load_dotenv
+from datetime import datetime
+import pytz
 from tools.config_manager import get_secret, get_secrets_list
 
 from langchain_openai import ChatOpenAI
@@ -22,6 +24,7 @@ OPENROUTER_KEYS = get_secrets_list("OPENROUTER_API_KEY")
 AI_MODEL = get_secret("AI_MODEL", "nvidia/nemotron-3-super-120b-a12b:free")
 current_key_index = 0
 MAX_MEMORY = 10  # Max messages kept per user
+IST = pytz.timezone('Asia/Kolkata')
 
 # ── Per-user Memory ────────────────────────────────────────────────────────────
 user_memory: Dict[int, List[BaseMessage]] = {}
@@ -207,7 +210,14 @@ async def run_agent(user_id: int, user_message: str) -> dict:
     Returns: {"text": str, "attachment": None | {"type": "photo", "path": str}}
     """
     human = HumanMessage(content=f"[user_id={user_id}]\n{user_message}")
-    input_messages = [SystemMessage(content=SYSTEM_PROMPT), *_get_memory(user_id), human]
+    
+    # 🕵️ Inject today's date for accurate timeframe tool usage
+    time_str = datetime.now(IST).strftime("%A, %d %B %Y, %H:%M %p")
+    input_messages = [
+        SystemMessage(content=SYSTEM_PROMPT + f"\n\n[CONTEXT: Today is {time_str} (IST)]"), 
+        *_get_memory(user_id), 
+        human
+    ]
 
     result = await agent.ainvoke({"messages": input_messages})
     all_msgs = result["messages"]

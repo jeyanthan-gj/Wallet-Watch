@@ -117,8 +117,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ── Error Handler ─────────────────────────────────────────────────────────────
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Log the error."""
-    logger.error(f"Exception while handling an update: {context.error}", exc_info=True)
+    """Log the error and handle specific telegram-level issues."""
+    error = context.error
+    
+    # 🕵️ Handle Conflict (409) gracefully — common during Render redeploys
+    if "Conflict: terminated by other getUpdates request" in str(error):
+        logger.warning("🛰️ Conflict detected: Another instance is already running. Waiting for it to finish...")
+        return
+
+    # 🕵️ Handle Unauthorized/Invalid Token (already caught at startup, but for safety)
+    if "Unauthorized" in str(error):
+        logger.error("🛑 Token failed mid-session! The bot might need to restart with a new token.")
+        return
+
+    logger.error(f"⚠️ Unexpected error: {error}", exc_info=True)
 
 
 # ── Daily Report Job ──────────────────────────────────────────────────────────
@@ -192,17 +204,22 @@ if __name__ == '__main__':
             application.add_handler(CommandHandler("history", history_command))
             application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
 
+            # 🛡️ Global Error Handler (Silent failover for network/conflict issues)
+            application.add_error_handler(error_handler)
+
             logger.info(f"✅ Token {i+1} verified. Bot is live!")
             application.run_polling(allowed_updates=Update.ALL_TYPES)
             break # Exit loop if polling started successfully
             
         except Exception as e:
             error_str = str(e).lower()
+            # ONLY rotate if it's a permanent Auth error
             if "unauthorized" in error_str or "invalid" in error_str or "401" in error_str:
                 logger.error(f"❌ Token {i+1} failed authentication. Checking next failover option...")
                 if i == len(BOT_TOKENS) - 1:
                     logger.critical("🚨 CRITICAL: All available Bot Tokens have failed!")
             else:
-                logger.error(f"💥 Failed to launch with current token: {e}")
-                # For network errors, we might want to retry the SAME token, but loop will move on.
-                # This is okay for a simple failover in this context.
+                # For Conflicts or Network issues, we might want to stay on this token
+                # but we'll log it and let Render handle the process restart if it crashes.
+                logger.error(f"💥 Temporary launch failure with current token: {e}")
+                break 

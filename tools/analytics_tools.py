@@ -12,26 +12,44 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 EXPORTS_DIR = os.path.join(BASE_DIR, "exports")
 os.makedirs(EXPORTS_DIR, exist_ok=True)
 
+import pytz
+
+IST = pytz.timezone('Asia/Kolkata')
+
+from dateutil import parser
+
 def _get_date_range(timeframe: str):
-    """Parses natural language timeframe into start and end dates."""
-    now = datetime.now()
-    end_date = now.strftime("%Y-%m-%d")
+    """
+    Parses natural language timeframe into start and end dates (IST aware).
+    Returns (start_date_str, end_date_str).
+    """
+    now = datetime.now(IST)
+    t = timeframe.lower().strip()
     
-    t = timeframe.lower()
+    # Default end date is 'tomorrow' to be inclusive of today's events for range comparisons
+    end_date = (now + timedelta(days=1))
+    
     if "today" in t:
-        start_date = end_date
+        start_date = now
     elif "week" in t:
-        start_date = (now - timedelta(days=7)).strftime("%Y-%m-%d")
+        start_date = (now - timedelta(days=7))
     elif "month" in t:
-        # Start of current month
-        start_date = now.replace(day=1).strftime("%Y-%m-%d")
+        start_date = now.replace(day=1)
     elif "year" in t:
-        start_date = now.replace(month=1, day=1).strftime("%Y-%m-%d")
+        start_date = now.replace(month=1, day=1)
     else:
-        # Default to last 30 days if unclear
-        start_date = (now - timedelta(days=30)).strftime("%Y-%m-%d")
-        
-    return start_date, end_date
+        # 🕵️ Try parsing specific dates/months like "April 23"
+        try:
+            # We use now as default so "April" defaults to current year
+            parsed_date = parser.parse(t, fuzzy=True, default=now)
+            start_date = parsed_date
+            # For a specific date, we look at just that 24h window
+            end_date = (parsed_date + timedelta(days=1))
+        except Exception:
+            # Fallback: last 30 days
+            start_date = (now - timedelta(days=30))
+            
+    return start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d")
 
 @tool
 def generate_chart(user_id: int, chart_type: str, timeframe: str):
