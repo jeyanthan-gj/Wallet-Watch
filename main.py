@@ -8,7 +8,7 @@ from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, Comma
 from database.manager import init_db, get_user_expenses, get_total_spent, register_user, get_active_users
 from database.recurring_manager import process_pending_bills
 from tools.report_generator import generate_morning_report
-from tools.config_manager import get_secret
+from tools.config_manager import get_secret, get_secrets_list
 from agent import run_agent
 import pytz
 from datetime import time
@@ -17,7 +17,7 @@ from datetime import time
 load_dotenv()
 
 # Configuration (Supabase FIRST, then .env)
-TELEGRAM_BOT_TOKEN = get_secret("TELEGRAM_BOT_TOKEN")
+BOT_TOKENS = get_secrets_list("TELEGRAM_BOT_TOKEN")
 
 # Enable logging
 logging.basicConfig(
@@ -138,7 +138,7 @@ async def daily_morning_report_job(context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logger.error(f"Failed to send report to {uid}: {e}")
 
-# ── Health Check Server (Zero-Dependency for Render Free Tier) ─────────────
+# ── Health Check Server (Zero-Dependency for Render Free Tier) ───────────
 
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -159,42 +159,50 @@ def run_health_check():
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 if __name__ == '__main__':
-    if not TELEGRAM_BOT_TOKEN:
-        print("ERROR: Please set TELEGRAM_BOT_TOKEN in your .env file.")
-    else:
-        print("🚀 Starting Wallet Watch (Gemini + LangGraph)...")
-        init_db()
+    init_db()
 
-        # Start health check server in a background thread for Render
-        threading.Thread(target=run_health_check, daemon=True).start()
+    # Start health check server in a background thread for Render
+    threading.Thread(target=run_health_check, daemon=True).start()
 
-        # Build application and enable JobQueue
-        application = (
-            ApplicationBuilder()
-            .token(TELEGRAM_BOT_TOKEN)
-            .connect_timeout(30.0)
-            .read_timeout(45.0)
-            .write_timeout(30.0)
-            .pool_timeout(30.0)
-            .build()
-        )
+    logger.info(f"🚀 Starting Wallet Watch with {len(BOT_TOKENS)} token(s) available...")
+    
+    for i, token in enumerate(BOT_TOKENS):
+        try:
+            logger.info(f"🔄 Attempting Login with Token Option {i+1}...")
+            
+            # Build application and enable JobQueue
+            application = (
+                ApplicationBuilder()
+                .token(token)
+                .connect_timeout(30.0)
+                .read_timeout(45.0)
+                .write_timeout(30.0)
+                .pool_timeout(30.0)
+                .build()
+            )
 
-        # Schedule the daily report at 07:00 IST
-        ist = pytz.timezone('Asia/Kolkata')
-        report_time = time(hour=7, minute=0, tzinfo=ist)
-        application.job_queue.run_daily(daily_morning_report_job, time=report_time)
-        print(f"⏰ Daily Report scheduled for 07:00 IST.")
+            # Schedule the daily report at 07:00 IST
+            ist = pytz.timezone('Asia/Kolkata')
+            report_time = time(hour=7, minute=0, tzinfo=ist)
+            application.job_queue.run_daily(daily_morning_report_job, time=report_time)
+            
+            # Register handlers
+            application.add_handler(CommandHandler("start", start_command))
+            application.add_handler(CommandHandler("summary", summary_command))
+            application.add_handler(CommandHandler("history", history_command))
+            application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
 
-        # Register commands
-        application.add_handler(CommandHandler("start", start_command))
-        application.add_handler(CommandHandler("summary", summary_command))
-        application.add_handler(CommandHandler("history", history_command))
-
-        # Route all text to the agent
-        application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
-
-        # Error handler
-        application.add_error_handler(error_handler)
-
-        print("✅ Bot is now listening...")
-        application.run_polling(allowed_updates=Update.ALL_TYPES)
+            logger.info(f"✅ Token {i+1} verified. Bot is live!")
+            application.run_polling(allowed_updates=Update.ALL_TYPES)
+            break # Exit loop if polling started successfully
+            
+        except Exception as e:
+            error_str = str(e).lower()
+            if "unauthorized" in error_str or "invalid" in error_str or "401" in error_str:
+                logger.error(f"❌ Token {i+1} failed authentication. Checking next failover option...")
+                if i == len(BOT_TOKENS) - 1:
+                    logger.critical("🚨 CRITICAL: All available Bot Tokens have failed!")
+            else:
+                logger.error(f"💥 Failed to launch with current token: {e}")
+                # For network errors, we might want to retry the SAME token, but loop will move on.
+                # This is okay for a simple failover in this context.

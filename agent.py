@@ -3,7 +3,7 @@ import re
 import json
 from typing import TypedDict, Annotated, List, Dict, Optional
 from dotenv import load_dotenv
-from tools.config_manager import get_secret
+from tools.config_manager import get_secret, get_secrets_list
 
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage, ToolMessage, AIMessage
@@ -18,8 +18,9 @@ from tools.recurring_tools import setup_recurring_bill, list_recurring_bills, re
 
 load_dotenv()
 
-OPENROUTER_API_KEY = get_secret("OPENROUTER_API_KEY")
+OPENROUTER_KEYS = get_secrets_list("OPENROUTER_API_KEY")
 AI_MODEL = get_secret("AI_MODEL", "nvidia/nemotron-3-super-120b-a12b:free")
+current_key_index = 0
 MAX_MEMORY = 10  # Max messages kept per user
 
 # ── Per-user Memory ────────────────────────────────────────────────────────────
@@ -37,9 +38,10 @@ def _update_memory(user_id: int, human: HumanMessage, ai_text: str):
 # ── LLM + Tools ────────────────────────────────────────────────────────────────
 llm = ChatOpenAI(
     model=AI_MODEL,
-    openai_api_key=OPENROUTER_API_KEY,
+    openai_api_key=OPENROUTER_KEYS[0] if OPENROUTER_KEYS else None,
     openai_api_base="https://openrouter.ai/api/v1",
     temperature=0.1,
+    max_retries=0, # We handle retries manually for key rotation
     default_headers={"HTTP-Referer": "https://wallet-watch-bot.app", "X-Title": "Wallet Watch"},
 )
 
@@ -56,8 +58,30 @@ class AgentState(TypedDict):
     messages: Annotated[List[BaseMessage], add_messages]
 
 async def llm_node(state: AgentState):
-    response = await llm_with_tools.ainvoke(state["messages"])
-    return {"messages": [response]}
+    global current_key_index
+    
+    while current_key_index < len(OPENROUTER_KEYS):
+        try:
+            # Update key in case of previous failure
+            llm.openai_api_key = OPENROUTER_KEYS[current_key_index]
+            # Bind tools again with the new LLM state if needed
+            bound_llm = llm.bind_tools(ALL_TOOLS)
+            response = await bound_llm.ainvoke(state["messages"])
+            return {"messages": [response]}
+        except Exception as e:
+            # Check if it's an authentication error
+            error_str = str(e).lower()
+            if "invalid api key" in error_str or "unauthorized" in error_str or "401" in error_str:
+                print(f"⚠️ Key Failover: Key {current_key_index + 1} failed. Trying next...")
+                current_key_index += 1
+                if current_key_index >= len(OPENROUTER_KEYS):
+                    raise e
+            else:
+                # Other errors (network, etc) should just be raised
+                raise e
+    
+    # Fallback if no keys work
+    raise Exception("All provided API keys failed.")
 
 async def tool_node(state: AgentState):
     last = state["messages"][-1]

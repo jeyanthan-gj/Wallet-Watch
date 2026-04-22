@@ -37,4 +37,5 @@ exports/
 verify_*.py
 migrate_*.py
 trash/
-tmp/
+# Dashboard (Hosted separately)
+dashboard/

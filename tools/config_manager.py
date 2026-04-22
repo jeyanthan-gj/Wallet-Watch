@@ -5,26 +5,41 @@ from dotenv import load_dotenv
 load_dotenv()
 
 def get_secret(key_name: str, default: str = None):
+    """Fetches the primary key (Env first, then Cloud)."""
+    options = get_secrets_list(key_name)
+    return options[0] if options else default
+
+def get_secrets_list(key_name: str) -> list:
     """
-    Fetches a sensitive key/setting.
+    Returns a unique list of available keys for rotation.
     Priority:
-    1. Supabase 'config' table (allows remote dashboard updates)
-    2. Environment Variable (.env or Render dashboard)
-    3. Default value
+    1. Environment Variable (.env)
+    2. Supabase 'config' table (key_name)
+    3. Supabase 'config' table backups (key_name_2, key_name_3, etc.)
     """
-    try:
-        # 1. Try Supabase
-        cloud_val = get_config(key_name)
-        if cloud_val:
-            return cloud_val
-    except Exception:
-        # If DB connection fails or table not ready, fallback immediately
-        pass
-        
-    # 2. Try Environment Variable
+    keys = []
+    
+    # 1. Primary from ENV
     env_val = os.getenv(key_name)
     if env_val:
-        return env_val
+        keys.append(env_val)
         
-    # 3. Fallback to default
-    return default
+    # 2. Primary from Cloud
+    try:
+        cloud_val = get_config(key_name)
+        if cloud_val and cloud_val not in keys:
+            keys.append(cloud_val)
+    except Exception:
+        pass
+
+    # 3. Backups from Cloud (up to 5 versions)
+    for i in range(2, 6):
+        try:
+            backup_key = f"{key_name}_{i}"
+            val = get_config(backup_key)
+            if val and val not in keys:
+                keys.append(val)
+        except Exception:
+            break
+            
+    return keys
