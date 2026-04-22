@@ -3,6 +3,7 @@ langchain-openai
 langchain-core
 pandas
 openpyxl
+matplotlib
 supabase
 postgrest
 pytz
