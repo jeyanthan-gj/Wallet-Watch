@@ -9,6 +9,13 @@ def init_db():
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     cursor.execute('''
+        CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY,
+            first_name TEXT,
+            joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    cursor.execute('''
         CREATE TABLE IF NOT EXISTS expenses (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER NOT NULL,
@@ -43,6 +50,7 @@ def init_db():
             is_active INTEGER DEFAULT 1,
             total_installments INTEGER,
             remaining_installments INTEGER,
+            interval_months INTEGER DEFAULT 1,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
@@ -59,7 +67,7 @@ def add_expense_to_db(user_id: int, amount: float, category: str, description: s
     ''', (user_id, amount, category, description, exp_type))
     conn.commit()
     conn.close()
-    return f"Successfully saved {exp_type}: ${amount} for {description} ({category})"
+    return f"Successfully saved {exp_type}: ₹{amount} for {description} ({category})"
 
 def get_user_expenses(user_id: int, limit: int = 5):
     """Fetches the last N expenses for a specific user."""
@@ -78,7 +86,7 @@ def get_user_expenses(user_id: int, limit: int = 5):
     if not rows:
         return "No expenses found."
     
-    history = "\n".join([f"- ${r[0]} on {r[1]} ({r[2]}) at {r[4]}" for r in rows])
+    history = "\n".join([f"- ₹{r[0]} on {r[1]} ({r[2]}) at {r[4]}" for r in rows])
     return f"Last {len(rows)} transactions:\n{history}"
 
 def get_total_spent(user_id: int):
@@ -88,7 +96,7 @@ def get_total_spent(user_id: int):
     cursor.execute('SELECT SUM(amount) FROM expenses WHERE user_id = ? AND type = "expense"', (user_id,))
     total = cursor.fetchone()[0]
     conn.close()
-    return f"Total spending to date: ${total if total else 0.0}"
+    return f"Total spending to date: ₹{total if total else 0.0}"
 
 def get_expenses_in_range(user_id: int, start_date: str, end_date: str):
     """Fetches all expenses for a user between two dates (YYYY-MM-DD)."""
@@ -193,8 +201,8 @@ def get_category_monthly_spend(user_id: int, category: str):
     conn.close()
     return total if total else 0.0
 
-def add_recurring_bill(user_id: int, amount: float, category: str, description: str, day_of_month: int, btype: str = 'expense', installments: int = None):
-    """Adds a new recurring transaction with optional installment limit."""
+def add_recurring_bill(user_id: int, amount: float, category: str, description: str, day_of_month: int, btype: str = 'expense', installments: int = None, interval: int = 1):
+    """Adds a new recurring transaction with optional installment limit and custom interval."""
     from datetime import datetime
     now = datetime.now()
     current_day = now.day
@@ -204,9 +212,9 @@ def add_recurring_bill(user_id: int, amount: float, category: str, description: 
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     cursor.execute('''
-        INSERT INTO recurring_bills (user_id, amount, category, description, day_of_month, type, last_processed_month, total_installments, remaining_installments)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ''', (user_id, amount, category, description, day_of_month, btype, last_processed, installments, installments))
+        INSERT INTO recurring_bills (user_id, amount, category, description, day_of_month, type, last_processed_month, total_installments, remaining_installments, interval_months)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (user_id, amount, category, description, day_of_month, btype, last_processed, installments, installments, interval))
     conn.commit()
     conn.close()
 
@@ -224,7 +232,7 @@ def get_active_recurring_bills(user_id: int):
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     cursor.execute('''
-        SELECT id, amount, category, description, day_of_month, type, last_processed_month, remaining_installments 
+        SELECT id, amount, category, description, day_of_month, type, last_processed_month, remaining_installments, interval_months 
         FROM recurring_bills 
         WHERE user_id = ? AND is_active = 1
     ''', (user_id,))
@@ -247,3 +255,28 @@ def delete_recurring_bill(bill_id: int):
     cursor.execute('UPDATE recurring_bills SET is_active = 0 WHERE id = ?', (bill_id,))
     conn.commit()
     conn.close()
+
+def register_user(user_id: int, first_name: str = None):
+    """Registers a new user or updates their name."""
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute('''
+        INSERT INTO users (user_id, first_name)
+        VALUES (?, ?)
+        ON CONFLICT(user_id) DO UPDATE SET first_name = excluded.first_name
+    ''', (user_id, first_name))
+    conn.commit()
+    conn.close()
+
+def get_active_users(days: int = 7):
+    """Returns user_ids who have logged something in the last N days."""
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT DISTINCT user_id 
+        FROM expenses 
+        WHERE date(created_at) >= date('now', ?)
+    ''', (f'-{days} days',))
+    rows = cursor.fetchall()
+    conn.close()
+    return [row[0] for row in rows]

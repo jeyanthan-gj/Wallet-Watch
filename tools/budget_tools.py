@@ -15,7 +15,7 @@ def manage_budgets(user_id: int, budget_configs: List[Dict]):
         cat = config.get("category")
         amt = config.get("amount")
         upsert_budget(user_id, cat, amt)
-        results.append(f"{cat}: ${amt}")
+        results.append(f"{cat}: ₹{amt}")
     
     return f"Successfully updated budgets:\n" + "\n".join(results)
 
@@ -42,7 +42,7 @@ def get_budget_report(user_id: int):
         percent = (current / limit) * 100 if limit > 0 else 0
         status_emoji = "✅" if percent < 80 else "⚠️" if percent < 100 else "🚨"
         
-        report.append(f"{status_emoji} *{cat}*: ${current} / ${limit} ({percent:.1f}%)")
+        report.append(f"{status_emoji} *{cat}*: ₹{current} / ₹{limit} ({percent:.1f}%)")
         # Simple progress bar
         bar_len = 10
         filled = min(int(percent / 10), bar_len)

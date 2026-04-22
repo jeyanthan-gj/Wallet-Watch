@@ -14,10 +14,19 @@ def process_pending_bills(user_id: int):
     notifications = []
     
     for bill in active_bills:
-        bill_id, amount, category, description, day_of_month, btype, last_processed, remaining = bill
+        bill_id, amount, category, description, day_of_month, btype, last_processed, remaining, interval = bill
         
-        # If the day has arrived AND we haven't processed it this month
-        if current_day >= day_of_month and last_processed != current_month_str:
+        # Calculate month difference
+        if last_processed:
+            lp_y, lp_m = map(int, last_processed.split('-'))
+            months_passed = (now.year - lp_y) * 12 + (now.month - lp_m)
+        else:
+            months_passed = interval # Treat new bills as due if day matches
+            
+        # Trigger if:
+        # 1. Monthly day has arrived (or passed)
+        # 2. Enough months have passed (months_passed >= interval)
+        if current_day >= day_of_month and months_passed >= interval:
             # Log the transaction
             add_expense_to_db(user_id, amount, category, f"[RECURRING] {description}", btype)
             # Mark as processed

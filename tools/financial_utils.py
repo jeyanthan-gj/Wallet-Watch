@@ -31,7 +31,7 @@ def log_transaction(user_id: int, amount: float, category: str, description: str
             current = get_category_monthly_spend(user_id, category)
             percent = (current / limit) * 100
             if percent >= 100:
-                alerts.append(f"🚨 BUDGET EXCEEDED: You've spent ${current} on {category} (Limit: ${limit})!")
+                alerts.append(f"🚨 BUDGET EXCEEDED: You've spent ₹{current} on {category} (Limit: ₹{limit})!")
             elif percent >= 80:
                 alerts.append(f"⚠️ BUDGET WARNING: You've used {percent:.1f}% of your {category} budget.")
         
@@ -42,7 +42,7 @@ def log_transaction(user_id: int, amount: float, category: str, description: str
             current_total = monthly_data.get("expense", 0.0)
             percent = (current_total / limit) * 100
             if percent >= 100:
-                alerts.append(f"🚨 TOTAL BUDGET EXCEEDED: Total spend ${current_total} (Limit: ${limit})!")
+                alerts.append(f"🚨 TOTAL BUDGET EXCEEDED: Total spend ₹{current_total} (Limit: ₹{limit})!")
             elif percent >= 80:
                 alerts.append(f"⚠️ TOTAL BUDGET WARNING: You've used {percent:.1f}% of your total monthly budget.")
 
@@ -51,7 +51,7 @@ def log_transaction(user_id: int, amount: float, category: str, description: str
         total_income = monthly_data.get("income", 0.0)
         total_expense = monthly_data.get("expense", 0.0)
         if total_expense > total_income > 0:
-            alerts.append(f"🚩 NEGATIVE CASH FLOW: Your total monthly spending (${total_expense}) has exceeded your income (${total_income})!")
+            alerts.append(f"🚩 NEGATIVE CASH FLOW: Your total monthly spending (₹{total_expense}) has exceeded your income (₹{total_income})!")
 
         if alerts:
             result += "\n\n" + "\n".join(alerts)
