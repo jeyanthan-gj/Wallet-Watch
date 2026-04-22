@@ -1,4 +1,6 @@
 import os
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 import logging
 from dotenv import load_dotenv
 from telegram import Update, BotCommand
@@ -136,6 +138,24 @@ async def daily_morning_report_job(context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logger.error(f"Failed to send report to {uid}: {e}")
 
+# ── Health Check Server (Zero-Dependency for Render Free Tier) ─────────────
+
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"OK")
+    
+    def log_message(self, format, *args):
+        # Keeps the logs clean
+        return
+
+def run_health_check():
+    port = int(os.environ.get("PORT", 8000))
+    print(f"📡 Health check server listening on port {port}")
+    server = HTTPServer(('0.0.0.0', port), HealthHandler)
+    server.serve_forever()
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 if __name__ == '__main__':
@@ -144,6 +164,9 @@ if __name__ == '__main__':
     else:
         print("🚀 Starting Wallet Watch (Gemini + LangGraph)...")
         init_db()
+
+        # Start health check server in a background thread for Render
+        threading.Thread(target=run_health_check, daemon=True).start()
 
         # Build application and enable JobQueue
         application = (
