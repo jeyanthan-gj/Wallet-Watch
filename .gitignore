@@ -1,8 +1,40 @@
+# Virtual Environment
 venv/
+.venv/
+env/
+bin/
+lib/
+share/
+include/
+
+# Python Cache
 __pycache__/
+*.py[cod]
+*$py.class
+
+# Environment Variables & Sensitive Info
 .env
+
+# Local Databases
 *.db
+*.sqlite3
+
+# IDE / Editor Configs
 .vscode/
 .idea/
+.project
+.pydevproject
+.settings/
+
+# Logs & Exports
 *.log
 exports/
+*.csv
+*.xlsx
+*.png
+
+# One-off / Internal Scripts
+verify_*.py
+migrate_*.py
+trash/
+tmp/

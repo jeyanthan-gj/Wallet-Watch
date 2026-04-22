@@ -3,6 +3,7 @@ import re
 import json
 from typing import TypedDict, Annotated, List, Dict, Optional
 from dotenv import load_dotenv
+from tools.config_manager import get_secret
 
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage, ToolMessage, AIMessage
@@ -17,8 +18,8 @@ from tools.recurring_tools import setup_recurring_bill, list_recurring_bills, re
 
 load_dotenv()
 
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-AI_MODEL = os.getenv("AI_MODEL", "nvidia/nemotron-3-super-120b-a12b:free")
+OPENROUTER_API_KEY = get_secret("OPENROUTER_API_KEY")
+AI_MODEL = get_secret("AI_MODEL", "nvidia/nemotron-3-super-120b-a12b:free")
 MAX_MEMORY = 10  # Max messages kept per user
 
 # ── Per-user Memory ────────────────────────────────────────────────────────────

@@ -6,6 +6,7 @@ from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, Comma
 from database.manager import init_db, get_user_expenses, get_total_spent, register_user, get_active_users
 from database.recurring_manager import process_pending_bills
 from tools.report_generator import generate_morning_report
+from tools.config_manager import get_secret
 from agent import run_agent
 import pytz
 from datetime import time
@@ -13,8 +14,8 @@ from datetime import time
 # Load environment variables
 load_dotenv()
 
-# Configuration
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+# Configuration (Supabase FIRST, then .env)
+TELEGRAM_BOT_TOKEN = get_secret("TELEGRAM_BOT_TOKEN")
 
 # Enable logging
 logging.basicConfig(

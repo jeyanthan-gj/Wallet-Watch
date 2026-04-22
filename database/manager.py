@@ -192,3 +192,15 @@ def get_active_users(days: int = 7):
         .execute()
     
     return list(set(row['user_id'] for row in response.data))
+
+def get_config(key_name: str):
+    """Fetches a configuration value from Supabase."""
+    response = supabase.table("config").select("key_value").eq("key_name", key_name).execute()
+    if response.data and len(response.data) > 0:
+        return response.data[0]["key_value"]
+    return None
+
+def set_config(key_name: str, key_value: str):
+    """Updates or creates a configuration value in Supabase."""
+    data = {"key_name": key_name, "key_value": key_value, "updated_at": datetime.now(IST).isoformat()}
+    supabase.table("config").upsert(data, on_conflict="key_name").execute()
