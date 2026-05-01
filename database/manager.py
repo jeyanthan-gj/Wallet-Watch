@@ -204,3 +204,77 @@ def set_config(key_name: str, key_value: str):
     """Updates or creates a configuration value in Supabase."""
     data = {"key_name": key_name, "key_value": key_value, "updated_at": datetime.now(IST).isoformat()}
     supabase.table("config").upsert(data, on_conflict="key_name").execute()
+
+
+# ── Transaction CRUD ──────────────────────────────────────────────────────────
+
+def get_transaction_by_id(user_id: int, transaction_id: int):
+    """
+    Fetches a single transaction by its ID, verifying ownership.
+    Returns a tuple (id, amount, category, description, type, created_at) or None.
+    """
+    response = supabase.table("expenses") \
+        .select("id, amount, category, description, type, created_at") \
+        .eq("id", transaction_id) \
+        .eq("user_id", user_id) \
+        .limit(1) \
+        .execute()
+
+    if not response.data:
+        return None
+
+    r = response.data[0]
+    return (r["id"], r["amount"], r["category"], r["description"], r["type"], r["created_at"])
+
+
+def search_transactions_db(user_id: int, keyword: str = None, category: str = None, limit: int = 10):
+    """
+    Searches transactions for a user by keyword (description match) and/or category.
+    Returns a list of tuples: (id, amount, category, description, type, created_at).
+    """
+    query = supabase.table("expenses") \
+        .select("id, amount, category, description, type, created_at") \
+        .eq("user_id", user_id) \
+        .order("created_at", desc=True) \
+        .limit(limit)
+
+    if category:
+        query = query.eq("category", category)
+
+    if keyword:
+        query = query.ilike("description", f"%{keyword}%")
+
+    response = query.execute()
+
+    return [
+        (r["id"], r["amount"], r["category"], r["description"], r["type"], r["created_at"])
+        for r in response.data
+    ]
+
+
+def delete_transaction_db(user_id: int, transaction_id: int):
+    """
+    Hard-deletes a transaction row, verifying ownership via user_id.
+    """
+    supabase.table("expenses") \
+        .delete() \
+        .eq("id", transaction_id) \
+        .eq("user_id", user_id) \
+        .execute()
+
+
+def update_transaction_db(user_id: int, transaction_id: int, amount: float,
+                          category: str, description: str, ttype: str):
+    """
+    Updates all editable fields of a transaction, verifying ownership via user_id.
+    """
+    supabase.table("expenses") \
+        .update({
+            "amount": amount,
+            "category": category,
+            "description": description,
+            "type": ttype,
+        }) \
+        .eq("id", transaction_id) \
+        .eq("user_id", user_id) \
+        .execute()
