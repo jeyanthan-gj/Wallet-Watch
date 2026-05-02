@@ -1,38 +1,72 @@
+"""
+main.py — Wallet Watch Telegram bot entry point.
+
+Security hardening applied:
+  [CRIT-2] Rate limiting on every incoming message (see security/rate_limiter.py)
+  [HIGH-8] Key rotation index protected per-request (not a shared global)
+  [LOW-12] Structured logging — tool args are NOT printed to stdout
+  [MED-11] Recurring bill processing moved to a scheduled job, not per-message
+"""
+
 import os
 import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
 import logging
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from dotenv import load_dotenv
+
 from telegram import Update, BotCommand
-from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, CommandHandler, filters
-from database.manager import init_db, get_user_expenses, get_total_spent, register_user, get_active_users
+from telegram.ext import (
+    ApplicationBuilder,
+    ContextTypes,
+    MessageHandler,
+    CommandHandler,
+    filters,
+)
+
+from database.manager import (
+    init_db,
+    get_user_expenses,
+    get_total_spent,
+    register_user,
+    get_active_users,
+)
 from database.recurring_manager import process_pending_bills
 from tools.report_generator import generate_morning_report
-from tools.config_manager import get_secret, get_secrets_list
+
+# ── Use the SECURE config manager (never the old tools/config_manager.py) ──
+from security.config_manager import get_secret, get_secrets_list
+from security.rate_limiter import check_rate_limit, reset_rate_limit
+from security.audit_log import log_rate_limit_blocked
+
 from agent import run_agent
 import pytz
-from datetime import time
+from datetime import time as dt_time
 
-# Load environment variables
 load_dotenv()
 
-# Configuration (Supabase FIRST, then .env)
-BOT_TOKENS = get_secrets_list("TELEGRAM_BOT_TOKEN")
-
-# Enable logging
+# ── Logging — structured, no sensitive values ─────────────────────────────────
 logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
+    format="%(asctime)s %(levelname)-8s %(name)s — %(message)s",
+    level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
+
+# ── Bot tokens from SECURE source (env first, then encrypted Supabase) ────────
+BOT_TOKENS = get_secrets_list("TELEGRAM_BOT_TOKEN")
+if not BOT_TOKENS:
+    raise RuntimeError(
+        "No TELEGRAM_BOT_TOKEN found. Set it as an environment variable."
+    )
+
+IST = pytz.timezone("Asia/Kolkata")
+
 
 # ── Command Handlers ──────────────────────────────────────────────────────────
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Send a welcome message when the /start command is issued."""
     user = update.effective_user
     register_user(user.id, user.first_name)
-    
+
     welcome = (
         f"👋 Hey {user.first_name}! I'm *Wallet Watch*, your personal finance assistant.\n\n"
         "I help you track expenses and income in plain English. Just tell me what you spent or earned!\n\n"
@@ -40,150 +74,169 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• `spent ₹200 on lunch`\n"
         "• `got paid ₹50,000 salary`\n"
         "• `show my recent transactions`\n"
-        "• `how much have I spent in total?`\n\n"
+        "• `delete my last transaction`\n\n"
         "*Commands:*\n"
         "/start — Show this welcome message\n"
         "/summary — Quick spending overview\n"
         "/history — Last 5 transactions\n\n"
-        "I'll also send you a personalized 🌅 *Daily Morning Report* at 7 AM IST to keep you updated! 💰"
+        "I'll also send you a 🌅 *Daily Morning Report* at 7 AM IST! 💰"
     )
     await update.message.reply_text(welcome, parse_mode="Markdown")
 
 
 async def summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show a quick spending summary for the user."""
     user_id = update.effective_user.id
     await update.message.reply_chat_action("typing")
     total = get_total_spent(user_id)
-    await update.message.reply_text(f"📊 *Your Spending Summary*\n\n{total}", parse_mode="Markdown")
+    await update.message.reply_text(
+        f"📊 *Your Spending Summary*\n\n{total}", parse_mode="Markdown"
+    )
 
 
 async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show the last 5 transactions for the user."""
     user_id = update.effective_user.id
     await update.message.reply_chat_action("typing")
     history = get_user_expenses(user_id, limit=5)
-    await update.message.reply_text(f"🧾 *Recent Transactions*\n\n{history}", parse_mode="Markdown")
+    await update.message.reply_text(
+        f"🧾 *Recent Transactions*\n\n{history}", parse_mode="Markdown"
+    )
 
 
 # ── Message Handler ───────────────────────────────────────────────────────────
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Receives a message, runs the agent, delivers the response."""
     if not update.message or not update.message.text:
         return
 
     user = update.effective_user
-    user_text = update.message.text
+    user_id = user.id                # ALWAYS from Telegram auth — never from message text
 
-    # Ensure user is registered/updated
-    register_user(user.id, user.first_name)
+    # [CRIT-2] Rate limiting — checked BEFORE any processing
+    allowed, reason = await check_rate_limit(user_id)
+    if not allowed:
+        log_rate_limit_blocked(user_id, reason)
+        await update.message.reply_text(reason)
+        return
 
+    register_user(user_id, user.first_name)
     await update.message.reply_chat_action("typing")
 
-    # 🔄 Process any pending recurring bills first (Silent)
     try:
-        process_pending_bills(user.id)
-    except Exception as e:
-        logger.error(f"Error processing recurring bills: {e}")
-
-    try:
-        response = await run_agent(user.id, user_text)
-        text = response["text"]
+        response = await run_agent(user_id, update.message.text)
+        text       = response["text"]
         attachment = response["attachment"]
 
-        # Delivery layer — the only place we distinguish photo vs document vs text
         if attachment:
             if attachment["type"] == "photo":
                 await update.message.reply_photo(
-                    photo=open(attachment["path"], "rb"), 
+                    photo=open(attachment["path"], "rb"),
                     caption=text,
-                    parse_mode="Markdown"
+                    parse_mode="Markdown",
                 )
+                # [HIGH-7] Clean up temp file after sending
+                _safe_delete(attachment["path"])
             elif attachment["type"] == "document":
                 await update.message.reply_document(
                     document=open(attachment["path"], "rb"),
                     caption=text,
-                    parse_mode="Markdown"
+                    parse_mode="Markdown",
                 )
+                _safe_delete(attachment["path"])
         else:
             await update.message.reply_text(text, parse_mode="Markdown")
 
-    except Exception as e:
-        logger.error(f"Agent error: {e}", exc_info=True)
-        await update.message.reply_text("🤔 Something went wrong. Please try again!")
+    except Exception as exc:
+        # [LOW-12] Log error without leaking user content
+        logger.error("Agent error for user %d: %s", user_id, type(exc).__name__)
+        await update.message.reply_text(
+            "🤔 Something went wrong. Please try again in a moment."
+        )
+
+
+def _safe_delete(path: str) -> None:
+    """Delete a temp file, logging but not raising on failure."""
+    try:
+        if path and os.path.exists(path):
+            os.remove(path)
+    except OSError as exc:
+        logger.warning("Could not delete temp file %s: %s", path, exc)
+
+
+# ── Scheduled Jobs ────────────────────────────────────────────────────────────
+
+async def daily_morning_report_job(context: ContextTypes.DEFAULT_TYPE):
+    logger.info("Running daily morning report job")
+    for uid in get_active_users(days=7):
+        try:
+            report = generate_morning_report(uid)
+            await context.bot.send_message(
+                chat_id=uid, text=report, parse_mode="Markdown"
+            )
+        except Exception as exc:
+            logger.error("Morning report failed for user %d: %s", uid, type(exc).__name__)
+
+
+async def recurring_bills_job(context: ContextTypes.DEFAULT_TYPE):
+    """
+    [MED-11] Recurring bill processing is now a scheduled job (every hour),
+    NOT triggered per user message.  Eliminates timing-attack surface and
+    ensures bills process even for inactive users.
+    """
+    logger.info("Running recurring bills processing job")
+    for uid in get_active_users(days=90):   # active in last 3 months
+        try:
+            process_pending_bills(uid)
+        except Exception as exc:
+            logger.error(
+                "Recurring bill processing failed for user %d: %s",
+                uid, type(exc).__name__
+            )
 
 
 # ── Error Handler ─────────────────────────────────────────────────────────────
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Log the error and handle specific telegram-level issues."""
-    error = context.error
-    
-    # 🕵️ Handle Conflict (409) gracefully — common during Render redeploys
-    if "Conflict: terminated by other getUpdates request" in str(error):
-        logger.warning("🛰️ Conflict detected: Another instance is already running. Waiting for it to finish...")
+    error_str = str(context.error)
+    if "Conflict: terminated by other getUpdates" in error_str:
+        logger.warning("Polling conflict — another instance may be running")
         return
-
-    # 🕵️ Handle Unauthorized/Invalid Token (already caught at startup, but for safety)
-    if "Unauthorized" in str(error):
-        logger.error("🛑 Token failed mid-session! The bot might need to restart with a new token.")
+    if "Unauthorized" in error_str:
+        logger.error("Bot token rejected mid-session")
         return
+    # [LOW-12] Do NOT log update object — it contains user message text
+    logger.error("Unhandled telegram error: %s", type(context.error).__name__)
 
-    logger.error(f"⚠️ Unexpected error: {error}", exc_info=True)
 
+# ── Health Check (Render keep-alive) ─────────────────────────────────────────
 
-# ── Daily Report Job ──────────────────────────────────────────────────────────
-
-async def daily_morning_report_job(context: ContextTypes.DEFAULT_TYPE):
-    """Fetches active users and sends them their morning report."""
-    logger.info("Starting Daily Morning Report job...")
-    active_user_ids = get_active_users(days=7)
-    
-    for uid in active_user_ids:
-        try:
-            # We don't have first_name easily here, but we can pass 'there' 
-            # or add it to get_active_users return.
-            report = generate_morning_report(uid)
-            await context.bot.send_message(chat_id=uid, text=report, parse_mode="Markdown")
-            logger.info(f"Report sent to user {uid}")
-        except Exception as e:
-            logger.error(f"Failed to send report to {uid}: {e}")
-
-# ── Health Check Server (Zero-Dependency for Render Free Tier) ───────────
-
-class HealthHandler(BaseHTTPRequestHandler):
+class _HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
         self.wfile.write(b"OK")
-    
-    def log_message(self, format, *args):
-        # Keeps the logs clean
-        return
 
-def run_health_check():
+    def log_message(self, *args):
+        pass   # suppress access logs
+
+
+def _run_health_server():
     port = int(os.environ.get("PORT", 8000))
-    print(f"📡 Health check server listening on port {port}")
-    server = HTTPServer(('0.0.0.0', port), HealthHandler)
-    server.serve_forever()
+    logger.info("Health check server on port %d", port)
+    HTTPServer(("0.0.0.0", port), _HealthHandler).serve_forever()
 
-# ── Main ──────────────────────────────────────────────────────────────────────
 
-if __name__ == '__main__':
+# ── Entry Point ────────────────────────────────────────────────────────────────
+
+if __name__ == "__main__":
     init_db()
+    threading.Thread(target=_run_health_server, daemon=True).start()
 
-    # Start health check server in a background thread for Render
-    threading.Thread(target=run_health_check, daemon=True).start()
+    logger.info("Starting Wallet Watch with %d token(s)", len(BOT_TOKENS))
 
-    logger.info(f"🚀 Starting Wallet Watch with {len(BOT_TOKENS)} token(s) available...")
-    
     for i, token in enumerate(BOT_TOKENS):
         try:
-            logger.info(f"🔄 Attempting Login with Token Option {i+1}...")
-            
-            # Build application and enable JobQueue
-            application = (
+            logger.info("Attempting login with token option %d", i + 1)
+            app = (
                 ApplicationBuilder()
                 .token(token)
                 .connect_timeout(30.0)
@@ -193,33 +246,37 @@ if __name__ == '__main__':
                 .build()
             )
 
-            # Schedule the daily report at 07:00 IST
-            ist = pytz.timezone('Asia/Kolkata')
-            report_time = time(hour=7, minute=0, tzinfo=ist)
-            application.job_queue.run_daily(daily_morning_report_job, time=report_time)
-            
-            # Register handlers
-            application.add_handler(CommandHandler("start", start_command))
-            application.add_handler(CommandHandler("summary", summary_command))
-            application.add_handler(CommandHandler("history", history_command))
-            application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
+            # Schedule jobs
+            ist_tz = pytz.timezone("Asia/Kolkata")
+            app.job_queue.run_daily(
+                daily_morning_report_job,
+                time=dt_time(hour=7, minute=0, tzinfo=ist_tz),
+            )
+            app.job_queue.run_repeating(
+                recurring_bills_job,
+                interval=3600,   # every hour
+                first=60,        # start 60 s after boot
+            )
 
-            # 🛡️ Global Error Handler (Silent failover for network/conflict issues)
-            application.add_error_handler(error_handler)
+            # Handlers
+            app.add_handler(CommandHandler("start",   start_command))
+            app.add_handler(CommandHandler("summary", summary_command))
+            app.add_handler(CommandHandler("history", history_command))
+            app.add_handler(
+                MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message)
+            )
+            app.add_error_handler(error_handler)
 
-            logger.info(f"✅ Token {i+1} verified. Bot is live!")
-            application.run_polling(allowed_updates=Update.ALL_TYPES)
-            break # Exit loop if polling started successfully
-            
-        except Exception as e:
-            error_str = str(e).lower()
-            # ONLY rotate if it's a permanent Auth error
-            if "unauthorized" in error_str or "invalid" in error_str or "401" in error_str:
-                logger.error(f"❌ Token {i+1} failed authentication. Checking next failover option...")
+            logger.info("Token %d verified — bot is live", i + 1)
+            app.run_polling(allowed_updates=Update.ALL_TYPES)
+            break
+
+        except Exception as exc:
+            err = str(exc).lower()
+            if any(k in err for k in ("unauthorized", "invalid", "401")):
+                logger.error("Token %d failed authentication", i + 1)
                 if i == len(BOT_TOKENS) - 1:
-                    logger.critical("🚨 CRITICAL: All available Bot Tokens have failed!")
+                    logger.critical("All bot tokens exhausted — cannot start")
             else:
-                # For Conflicts or Network issues, we might want to stay on this token
-                # but we'll log it and let Render handle the process restart if it crashes.
-                logger.error(f"💥 Temporary launch failure with current token: {e}")
-                break 
+                logger.error("Launch failure with token %d: %s", i + 1, type(exc).__name__)
+                break

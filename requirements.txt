@@ -1,13 +1,25 @@
+# Core bot
+python-telegram-bot[job-queue]
+
+# LangChain / LangGraph agent
 langgraph
 langchain-openai
 langchain-core
+
+# Data / exports
 pandas
 openpyxl
 matplotlib
+python-dateutil
+
+# Database
 supabase
 postgrest
+
+# Encryption (NEW — for secure secret storage)
+cryptography
+
+# Utilities
 pytz
-python-dateutil
 python-dotenv
-python-telegram-bot[job-queue]
 flask
