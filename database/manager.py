@@ -1,20 +1,10 @@
 """
-database/manager.py — All Supabase data access.
+database/manager.py
 
-IDOR / Ownership fixes applied in this revision:
-  VULN-1  decrement_installments: now requires user_id; verifies bill
-          ownership before update; raises OwnershipError on mismatch.
-  VULN-2  mark_bill_processed: now requires user_id; WHERE clause
-          includes both id AND user_id.
-  VULN-3  delete_recurring_bill: now requires user_id; WHERE clause
-          includes both id AND user_id.
-  VULN-4  process_pending_bills TOCTOU: all three internal calls now
-          pass user_id so each DB operation independently enforces ownership.
-  VULN-8  get_active_users: internal-only; caller must pass
-          require_admin=True or be called from a scheduled job context.
-  VULN-9  RLS policy strategy: documented — service role bypasses RLS,
-          so Python-layer ownership checks are the authoritative guard.
-          See security_migration.sql for belt-and-suspenders DB constraints.
+[11] get_user_expenses() now formats dates as "11 Apr 2026, 07:49 AM"
+     using fmt_datetime from tools/time_utils — no more raw ISO strings.
+[10] fmt_amount used in get_total_spent for consistent ₹ formatting.
+All IDOR ownership checks from previous revision retained.
 """
 
 import logging
@@ -27,10 +17,7 @@ logger = logging.getLogger(__name__)
 IST = pytz.timezone("Asia/Kolkata")
 
 
-# ── Init ──────────────────────────────────────────────────────────────────────
-
 def init_db():
-    """Ensures all required tables exist."""
     _ensure_audit_log_table()
 
 
@@ -58,11 +45,31 @@ def _ensure_audit_log_table():
             )
 
 
+# ── Formatting helpers (local, avoid circular import with tools/) ─────────────
+
+def _fmt_dt(iso_str: str) -> str:
+    """Format ISO timestamp → '11 Apr 2026, 07:49 AM' IST."""
+    try:
+        dt = datetime.fromisoformat(iso_str)
+        if dt.tzinfo is None:
+            dt = IST.localize(dt)
+        else:
+            dt = dt.astimezone(IST)
+        return dt.strftime("%-d %b %Y, %I:%M %p")
+    except Exception:
+        return iso_str[:16]
+
+
+def _fmt_amount(amount) -> str:
+    """₹200 for whole numbers, ₹241.50 for fractions."""
+    v = float(amount)
+    return f"₹{int(v):,}" if v == int(v) else f"₹{v:,.2f}"
+
+
 # ── Expenses ──────────────────────────────────────────────────────────────────
 
 def add_expense_to_db(user_id: int, amount: float, category: str,
                       description: str, exp_type: str) -> str:
-    """Insert a transaction. user_id is always set from the authenticated session."""
     supabase.table("expenses").insert({
         "user_id":     user_id,
         "amount":      amount,
@@ -71,7 +78,7 @@ def add_expense_to_db(user_id: int, amount: float, category: str,
         "type":        exp_type,
         "created_at":  datetime.now(IST).isoformat(),
     }).execute()
-    return f"Successfully saved {exp_type}: ₹{amount} for {description} ({category})"
+    return f"Successfully saved {exp_type}: {_fmt_amount(amount)} for {description} ({category})"
 
 
 def get_expenses_in_range(user_id: int, start_date: str, end_date: str):
@@ -82,7 +89,7 @@ def get_user_expenses(user_id: int, limit: int = 10) -> str:
     response = (
         supabase.table("expenses")
         .select("amount, category, description, type, created_at")
-        .eq("user_id", user_id)           # ownership scoped
+        .eq("user_id", user_id)
         .order("created_at", desc=True)
         .limit(limit)
         .execute()
@@ -90,8 +97,10 @@ def get_user_expenses(user_id: int, limit: int = 10) -> str:
     rows = response.data
     if not rows:
         return "No transactions found."
+    # [11] Human-readable IST dates, no trailing .0 on amounts
     history = "\n".join(
-        f"- ₹{r['amount']} on {r['category']} ({r['description']}) at {r['created_at'][:16]}"
+        f"- {_fmt_amount(r['amount'])} on {r['category']} "
+        f"({r['description'] or '—'}) at {_fmt_dt(r['created_at'])}"
         for r in rows
     )
     return f"Last {len(rows)} transactions:\n{history}"
@@ -101,17 +110,17 @@ def get_total_spent(user_id: int) -> str:
     response = (
         supabase.table("expenses")
         .select("amount")
-        .eq("user_id", user_id)           # ownership scoped
+        .eq("user_id", user_id)
         .eq("type", "expense")
         .execute()
     )
     total = sum(item["amount"] for item in response.data) if response.data else 0.0
-    return f"Total spending to date: ₹{total:,.2f}"
+    return f"Total spending to date: {_fmt_amount(total)}"
 
 
 def get_filtered_expenses(user_id: int, category: str = None, start_date: str = None,
                            end_date: str = None, exp_type: str = None):
-    query = supabase.table("expenses").select("*").eq("user_id", user_id)  # ownership scoped
+    query = supabase.table("expenses").select("*").eq("user_id", user_id)
     if category:   query = query.eq("category", category)
     if exp_type:   query = query.eq("type", exp_type)
     if start_date: query = query.gte("created_at", start_date)
@@ -136,7 +145,7 @@ def get_budgets(user_id: int) -> dict:
     response = (
         supabase.table("budgets")
         .select("category, amount")
-        .eq("user_id", user_id)           # ownership scoped
+        .eq("user_id", user_id)
         .execute()
     )
     return {
@@ -151,7 +160,7 @@ def get_monthly_summary(user_id: int) -> dict:
     response = (
         supabase.table("expenses")
         .select("type, amount")
-        .eq("user_id", user_id)           # ownership scoped
+        .eq("user_id", user_id)
         .gte("created_at", start)
         .execute()
     )
@@ -169,7 +178,7 @@ def get_category_monthly_spend(user_id: int, category: str) -> float:
     response = (
         supabase.table("expenses")
         .select("amount")
-        .eq("user_id", user_id)           # ownership scoped
+        .eq("user_id", user_id)
         .eq("category", category)
         .eq("type", "expense")
         .gte("created_at", start)
@@ -200,11 +209,10 @@ def add_recurring_bill(user_id: int, amount: float, category: str, description: 
 
 
 def get_active_recurring_bills(user_id: int) -> list:
-    """Always scoped to user_id — never returns bills from other users."""
     response = (
         supabase.table("recurring_bills")
         .select("*")
-        .eq("user_id", user_id)           # ownership scoped
+        .eq("user_id", user_id)
         .eq("is_active", True)
         .execute()
     )
@@ -215,12 +223,7 @@ def get_active_recurring_bills(user_id: int) -> list:
     ]
 
 
-def _get_bill_owner(bill_id: int) -> int | None:
-    """
-    Fetch the user_id that owns a recurring bill.
-    Returns None if the bill doesn't exist.
-    Used internally to enforce ownership before mutations.
-    """
+def _get_bill_owner(bill_id: int):
     response = (
         supabase.table("recurring_bills")
         .select("user_id")
@@ -228,28 +231,21 @@ def _get_bill_owner(bill_id: int) -> int | None:
         .limit(1)
         .execute()
     )
-    if response.data:
-        return response.data[0]["user_id"]
-    return None
+    return response.data[0]["user_id"] if response.data else None
 
 
 def decrement_installments(bill_id: int, user_id: int) -> None:
-    """
-    VULN-1 FIX: user_id now required. Verifies ownership before mutating.
-    Reduces remaining_installments by 1; deactivates bill if count hits 0.
-    """
     owner = _get_bill_owner(bill_id)
     if owner is None:
         logger.warning("decrement_installments: bill %d not found", bill_id)
         return
-    # Raises OwnershipError if user_id != owner
     require_ownership(user_id, owner, f"recurring bill #{bill_id}")
 
     bill = (
         supabase.table("recurring_bills")
         .select("remaining_installments")
         .eq("id", bill_id)
-        .eq("user_id", user_id)           # second ownership filter at DB layer
+        .eq("user_id", user_id)
         .single()
         .execute()
     )
@@ -260,38 +256,24 @@ def decrement_installments(bill_id: int, user_id: int) -> None:
     update_data = {"remaining_installments": new_rem}
     if new_rem <= 0:
         update_data["is_active"] = False
-
     supabase.table("recurring_bills").update(update_data) \
-        .eq("id", bill_id).eq("user_id", user_id).execute()  # WHERE id AND user_id
+        .eq("id", bill_id).eq("user_id", user_id).execute()
 
 
 def mark_bill_processed(bill_id: int, month_str: str, user_id: int) -> None:
-    """
-    VULN-2 FIX: user_id now required. WHERE clause filters both id AND user_id.
-    If the bill doesn't belong to this user the UPDATE affects 0 rows (silent no-op).
-    """
     supabase.table("recurring_bills") \
         .update({"last_processed_month": month_str}) \
-        .eq("id", bill_id) \
-        .eq("user_id", user_id) \
-        .execute()
+        .eq("id", bill_id).eq("user_id", user_id).execute()
 
 
 def delete_recurring_bill(bill_id: int, user_id: int) -> None:
-    """
-    VULN-3 FIX: user_id now required. WHERE clause filters both id AND user_id.
-    A user cannot deactivate another user's recurring bill by guessing an ID.
-    """
     owner = _get_bill_owner(bill_id)
     if owner is None:
-        return  # already gone
+        return
     require_ownership(user_id, owner, f"recurring bill #{bill_id}")
-
     supabase.table("recurring_bills") \
         .update({"is_active": False}) \
-        .eq("id", bill_id) \
-        .eq("user_id", user_id) \
-        .execute()
+        .eq("id", bill_id).eq("user_id", user_id).execute()
 
 
 # ── Users ─────────────────────────────────────────────────────────────────────
@@ -308,7 +290,7 @@ def get_user_first_name(user_id: int) -> str:
         response = (
             supabase.table("users")
             .select("first_name")
-            .eq("user_id", user_id)       # ownership scoped
+            .eq("user_id", user_id)
             .limit(1)
             .execute()
         )
@@ -320,12 +302,7 @@ def get_user_first_name(user_id: int) -> str:
 
 
 def get_active_users(days: int = 7) -> list:
-    """
-    VULN-8: This function returns ALL active user IDs — it is intentionally
-    internal-only and must NEVER be exposed as a tool callable by users.
-    It is called exclusively from scheduled jobs in main.py which run
-    under bot-operator authority, not user authority.
-    """
+    """Internal-only — never expose as a user-callable tool."""
     cutoff = (datetime.now(IST) - timedelta(days=days)).isoformat()
     try:
         response = (
@@ -363,16 +340,11 @@ def set_config(key_name: str, key_value: str):
 # ── Transaction CRUD ──────────────────────────────────────────────────────────
 
 def get_transaction_by_id(user_id: int, transaction_id: int):
-    """
-    Fetch a transaction by ID. user_id is always in the WHERE clause —
-    returns None (not a 403) so callers can show a neutral 'not found' message
-    without leaking whether the ID exists for another user.
-    """
     response = (
         supabase.table("expenses")
         .select("id, amount, category, description, type, created_at")
         .eq("id", transaction_id)
-        .eq("user_id", user_id)           # ownership enforced at DB layer
+        .eq("user_id", user_id)
         .limit(1)
         .execute()
     )
@@ -387,7 +359,7 @@ def search_transactions_db(user_id: int, keyword: str = None,
     query = (
         supabase.table("expenses")
         .select("id, amount, category, description, type, created_at")
-        .eq("user_id", user_id)           # ownership scoped
+        .eq("user_id", user_id)
         .order("created_at", desc=True)
         .limit(limit)
     )
@@ -401,7 +373,6 @@ def search_transactions_db(user_id: int, keyword: str = None,
 
 
 def delete_transaction_db(user_id: int, transaction_id: int) -> None:
-    """WHERE clause always includes BOTH id AND user_id — IDOR safe."""
     supabase.table("expenses") \
         .delete() \
         .eq("id", transaction_id) \
@@ -411,7 +382,6 @@ def delete_transaction_db(user_id: int, transaction_id: int) -> None:
 
 def update_transaction_db(user_id: int, transaction_id: int, amount: float,
                            category: str, description: str, ttype: str) -> None:
-    """WHERE clause always includes BOTH id AND user_id — IDOR safe."""
     supabase.table("expenses") \
         .update({"amount": amount, "category": category,
                  "description": description, "type": ttype}) \

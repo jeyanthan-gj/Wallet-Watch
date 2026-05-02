@@ -46,7 +46,7 @@ async def check_rate_limit(user_id: int) -> tuple[bool, str]:
         # --- Burst check (short window) ---
         burst_count = sum(1 for t in ts if t >= now - _BURST_WIN)
         if burst_count >= _BURST_MAX:
-            wait = int(_BURST_WIN - (now - ts[-_BURST_MAX]) + 1)
+            burst_ts = list(ts); wait = int(_BURST_WIN - (now - burst_ts[-_BURST_MAX]) + 1) if len(burst_ts) >= _BURST_MAX else _BURST_WIN
             return False, (
                 f"⏳ Slow down! You sent {_BURST_MAX} messages in {_BURST_WIN}s. "
                 f"Please wait ~{wait}s."

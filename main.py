@@ -101,7 +101,7 @@ async def summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     await update.message.reply_chat_action("typing")
-    history = get_user_expenses(user_id, limit=5)
+    history = get_user_expenses(user_id, limit=10)
     await update.message.reply_text(f"🧾 *Recent Transactions*\n\n{history}", parse_mode="Markdown")
 
 

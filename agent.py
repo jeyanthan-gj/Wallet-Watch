@@ -261,10 +261,7 @@ def _to_text(raw: str) -> str:
     if found:
         parts = []
         for f in found:
-            try:
-                parts.append(f.encode().decode("unicode_escape"))
-            except Exception:
-                parts.append(f)
+            parts.append(f)  # [9] no unicode_escape — would corrupt ₹/emoji
         return "\n".join(parts).strip()
     return s
 

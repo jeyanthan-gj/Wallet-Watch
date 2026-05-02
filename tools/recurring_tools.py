@@ -1,26 +1,18 @@
 """
-tools/recurring_tools.py
-
-IDOR fixes:
-  - remove_recurring_bill now calls delete_recurring_bill(bill_id, user_id)
-    which verifies ownership at the DB layer (not just via a Python set lookup).
-  - All mutations pass user_id through to the DB functions.
+tools/recurring_tools.py — Recurring bill management.
+Uses fmt_amount from time_utils for consistent ₹ formatting.
 """
 
 from langchain_core.tools import tool
-from database.manager import (
-    add_recurring_bill,
-    get_active_recurring_bills,
-    delete_recurring_bill,
-)
+from database.manager import add_recurring_bill, get_active_recurring_bills, delete_recurring_bill
 from security.validators import (
     validate_amount, validate_category, validate_description,
     validate_day_of_month, validate_installments, validate_interval,
-    validate_transaction_id, validate_type,
-    ValidationError,
+    validate_transaction_id, validate_type, ValidationError,
 )
 from security.audit_log import log_event
 from security.rbac import OwnershipError
+from tools.time_utils import fmt_amount
 
 
 @tool
@@ -56,7 +48,7 @@ def setup_recurring_bill(
     interval_str = f"every {interval} months" if interval > 1 else "monthly"
     dur_str      = f"for {installments} payments" if installments else "ongoing"
     return (
-        f"✅ Recurring {btype} set up: ₹{amount:,.0f} for '{description}' "
+        f"✅ Recurring {btype} set up: {fmt_amount(amount)} for *{description}* "
         f"on day {day_of_month}, {interval_str}, {dur_str}."
     )
 
@@ -64,7 +56,7 @@ def setup_recurring_bill(
 @tool
 def list_recurring_bills(user_id: int):
     """Returns a clean list of all active recurring transactions."""
-    bills = get_active_recurring_bills(user_id)   # always scoped to user_id
+    bills = get_active_recurring_bills(user_id)
     if not bills:
         return "You have no active recurring transactions."
 
@@ -74,7 +66,7 @@ def list_recurring_bills(user_id: int):
         interval_str = f"every {interval} months" if interval > 1 else "monthly"
         dur_str      = f" | {remaining} left" if remaining is not None else " | ongoing"
         lines.append(
-            f"#{bill_id} | ₹{amount:,.0f} {btype} | {description} "
+            f"*#{bill_id}* | {fmt_amount(amount)} {btype} | *{description}* "
             f"| day {day} {interval_str}{dur_str}"
         )
     return "\n".join(lines)
@@ -84,7 +76,7 @@ def list_recurring_bills(user_id: int):
 def remove_recurring_bill(user_id: int, bill_id: int):
     """
     Deactivates a recurring transaction by its ID.
-    List bills first, then confirm with the user before calling this.
+    Always list bills first and confirm with the user before calling this.
     - user_id: Verified against the bill owner at the DB layer.
     - bill_id: Shown in list_recurring_bills output.
     """
@@ -95,10 +87,7 @@ def remove_recurring_bill(user_id: int, bill_id: int):
 
     try:
         log_event("recurring.remove", user_id, {"bill_id": bill_id})
-        # IDOR FIX: delete_recurring_bill now takes user_id and verifies
-        # ownership inside the DB function — no longer relies solely on
-        # a Python-side set membership check.
         delete_recurring_bill(bill_id, user_id)
-        return f"✅ Recurring bill #{bill_id} has been deactivated."
+        return f"✅ Recurring bill *#{bill_id}* has been deactivated."
     except OwnershipError:
         return f"❌ Recurring bill #{bill_id} not found or does not belong to you."
